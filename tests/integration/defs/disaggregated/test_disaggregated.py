@@ -100,6 +100,8 @@ def get_test_config(test_desc, example_dir, test_root):
         (2,
          f"{test_configs_root}/disagg_config_ctxtp1_gentp1_deepseek_v3_lite_one_mtp_attention_dp_overlap.yaml"
          ),
+        "llama_eagle_single_gpu":
+        (2, f"{test_configs_root}/disagg_config_llama_eagle_tp1.yaml"),
     }
 
     if test_desc not in config_map:
@@ -191,7 +193,7 @@ def run_disaggregated_test(example_dir,
                 for output_file in output_files:
                     with open(output_file, 'r') as f:
                         content = f.read()
-                        if "deepseek_v3_lite" in test_desc or output_file == "output_chat.json":
+                        if "deepseek_v3_lite" in test_desc or "llama_eagle" in test_desc or output_file == "output_chat.json":
                             expected_strings = ["Berlin", "Asyncio is a"]
                         else:
                             expected_strings = [
@@ -453,6 +455,33 @@ def test_disaggregated_conditional(disaggregated_test_root, llm_venv,
 
     run_disaggregated_test(disaggregated_example_root,
                            "conditional",
+                           env=llm_venv._new_env,
+                           cwd=llm_venv.get_working_directory())
+
+
+@skip_no_hopper
+@pytest.mark.skip_less_device(4)
+@pytest.mark.parametrize("llama_model_root", ['llama-3.1-8b-instruct-hf'],
+                         indirect=True)
+@pytest.mark.parametrize("eagle_model_roots", ['EAGLE3-LLaMA3.1-Instruct-8B'],
+                         indirect=True)
+def test_disaggregated_llama_eagle_single_gpu(disaggregated_test_root,
+                                              disaggregated_example_root,
+                                              llm_venv, llama_model_root,
+                                              eagle_model_roots):
+    src_dst_dict = {
+        llama_model_root:
+        f"{llm_venv.get_working_directory()}/Llama-3.1-8B-Instruct",
+        eagle_model_roots:
+        f"{llm_venv.get_working_directory()}/EAGLE3-LLaMA3.1-Instruct-8B",
+    }
+    for src, dst in src_dst_dict.items():
+        if not os.path.islink(dst):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            os.symlink(src, dst, target_is_directory=True)
+
+    run_disaggregated_test(disaggregated_example_root,
+                           "llama_eagle_single_gpu",
                            env=llm_venv._new_env,
                            cwd=llm_venv.get_working_directory())
 

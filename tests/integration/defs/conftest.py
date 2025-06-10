@@ -1020,6 +1020,9 @@ def llama_model_root(request):
     elif request.param == "llama-3.1-8b-instruct-hf-fp8":
         llama_model_root = os.path.join(models_root, "llama-3.1-model",
                                         "Llama-3.1-8B-Instruct-FP8")
+    elif request.param == "llama-3.1-8b-instruct-hf":
+        llama_model_root = os.path.join(models_root, "llama-3.1-model",
+                                        "Llama-3.1-8B-Instruct")
     elif request.param == "llama-3.1-8b-hf-nvfp4":
         llama_model_root = os.path.join(models_root, "nvfp4-quantized",
                                         "Meta-Llama-3.1-8B")
@@ -1183,6 +1186,13 @@ def eagle_model_roots(request):
             modelopt_checkpoint_root_for_eagle
         ), f"EAGLE ModelOpt checkpoint path {modelopt_checkpoint_root_for_eagle} does not exist under NFS LLM_MODELS_ROOT dir"
         return modelopt_checkpoint_root_for_eagle
+    elif request.param == "EAGLE3-LLaMA3.1-Instruct-8B":
+        eagle_heads_model_root = os.path.join(models_root,
+                                              "EAGLE3-LLaMA3.1-Instruct-8B")
+        assert os.path.exists(
+            eagle_heads_model_root
+        ), f"EAGLE heads model  path {eagle_heads_model_root} does not exist under NFS LLM_MODELS_ROOT dir"
+        return eagle_heads_model_root
     else:
         assert "Error Eagle weight's name"
 
