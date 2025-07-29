@@ -83,45 +83,13 @@ class ExecutorRequestQueue:
             pass
         return items
 
-    def _get_from_waiting_queue_attention_tp(
+    def _get_from_waiting_queue(
         self,
         waiting_queue: deque[RequestQueueItem],
         max_req_count: int,
+        enable_attention_dp: bool,
     ) -> List[RequestQueueItem]:
-        """Safely extracts up to max_req_count items from a deque.
 
-        Args:
-            waiting_queue: The queue to pop items from.
-            max_req_count: Maximum items to retrieve. Returns empty list if <=0.
-
-        Returns:
-            List of retrieved items (may be shorter than max_req_count if queue empties first).
-        """
-        # Edge case handling
-        if max_req_count <= 0:  # Handles negative/zero counts
-            return []
-
-        items = []
-        req_count = 0
-        while req_count < max_req_count and waiting_queue:
-            items.append(waiting_queue.popleft())
-            req_count += 1
-        return items
-
-    def _get_from_waiting_queue_attention_dp(
-        self,
-        waiting_queue: deque[RequestQueueItem],
-        max_req_count: int,
-    ) -> List[RequestQueueItem]:
-        """Extract requests from waiting queue with attention DP load balancing.
-
-        Args:
-            waiting_queue: Queue of pending requests
-            max_req_count: Maximum number of requests to extract
-
-        Returns:
-            List of requests that can be processed immediately
-        """
         if max_req_count <= 0:
             return []
 
@@ -130,14 +98,15 @@ class ExecutorRequestQueue:
         pending_requests = []
 
         # Track the request with strict requirements
-        all_ranks_num_active_requests = self.all_ranks_num_active_requests.copy(
-        )
+        scheduling_all_ranks_num_active_requests = self.all_ranks_num_active_requests.copy(
+        ) if enable_attention_dp else None
         while req_count < max_req_count and waiting_queue:
             req_item = waiting_queue.popleft()
-            can_process_now = self._can_process_attention_dp_request(
-                req_item, all_ranks_num_active_requests)
+            can_process = self._can_process_attention_dp_request(
+                req_item, scheduling_all_ranks_num_active_requests
+            ) if enable_attention_dp else True
 
-            if can_process_now:
+            if can_process:
                 items.append(req_item)
                 req_count += 1
             else:
@@ -145,40 +114,29 @@ class ExecutorRequestQueue:
 
         # Put the pending requests back to the waiting queue
         # All ranks should have the same waiting queue
-        self.waiting_queue.extendleft(pending_requests)
+        self.waiting_queue.extendleft(reversed(pending_requests))
 
         return items
 
     def _can_process_attention_dp_request(
             self, req_item: RequestQueueItem,
             all_ranks_num_active_requests: List[int]) -> bool:
-        """Check if a request can be processed immediately.
+        """Return True if the request can be processed immediately, else False."""
 
-        Returns:
-            True if the request can be processed now, False if it should be deferred.
-        """
-        # Handle requests without schedule parameters
-        if req_item.request.py_schedule_params is None:
+        scheduling_params = req_item.request.py_scheduling_params
+        if scheduling_params is None:
             return True
 
-        schedule_params = req_item.request.py_schedule_params
-        target_dp_rank = schedule_params.attention_dp_rank
-        is_relax = schedule_params.attention_dp_relax
-
-        # Handle requests without target rank or in relax mode
-        if target_dp_rank is None or is_relax:
+        target_dp_rank = scheduling_params.attention_dp_rank
+        if target_dp_rank is None or scheduling_params.attention_dp_relax:
             return True
 
-        # Handle strict mode requests - check target rank capacity
-        target_rank_has_capacity = (
-            all_ranks_num_active_requests[target_dp_rank]
-            < self.max_num_active_requests)
-
-        if target_rank_has_capacity:
+        if all_ranks_num_active_requests[
+                target_dp_rank] < self.max_num_active_requests:
             all_ranks_num_active_requests[target_dp_rank] += 1
             return True
-        else:
-            return False
+
+        return False
 
     def enqueue_requests(self, requests: List[ExecutorRequest]):
         req_ids = []
@@ -238,7 +196,9 @@ class ExecutorRequestQueue:
         return can_enqueue and self.dist.rank == 0
 
     def _fetch_and_process_requests(
-            self, total_num_active_requests: int) -> List[RequestQueueItem]:
+            self, total_num_active_requests: int,
+            total_max_num_active_requests: int,
+            enable_attention_dp: bool) -> List[RequestQueueItem]:
         """Common logic for fetching and processing requests from the queue."""
         # Calculate timeout
         timeout = None if (total_num_active_requests == 0) and len(
@@ -264,6 +224,17 @@ class ExecutorRequestQueue:
 
         self.waiting_queue.extend(new_requests)
 
+        new_requests = self._get_from_waiting_queue(
+            self.waiting_queue,
+            total_max_num_active_requests - total_num_active_requests,
+            enable_attention_dp)
+
+        # Update performance metrics
+        if self.enable_iter_perf_stats and self.dist.rank == 0:
+            self._update_new_active_requests_queue_latency(new_requests)
+
+        return new_requests
+
     @nvtx_range("_fetch_new_requests")
     def fetch_new_requests(self,
                            num_active_requests: int) -> List[RequestQueueItem]:
@@ -280,15 +251,10 @@ class ExecutorRequestQueue:
         total_max_num_active_requests = self.max_num_active_requests
 
         # fetch and process requests into waiting queue
-        self._fetch_and_process_requests(total_num_active_requests)
-
-        new_requests = self._get_from_waiting_queue_attention_tp(
-            self.waiting_queue,
-            total_max_num_active_requests - total_num_active_requests)
-
-        # Update performance metrics
-        if self.enable_iter_perf_stats and self.dist.rank == 0:
-            self._update_new_active_requests_queue_latency(new_requests)
+        new_requests = self._fetch_and_process_requests(
+            total_num_active_requests,
+            total_max_num_active_requests,
+            enable_attention_dp=False)
 
         # Merge requests and add to active list
         merged_requests = self._merge_requests(new_requests)
@@ -307,16 +273,10 @@ class ExecutorRequestQueue:
         total_max_num_active_requests = self.dist.tp_size * self.max_num_active_requests
 
         # fetch and process requests into waiting queue
-        self._fetch_and_process_requests(total_num_active_requests)
-
-        new_requests = self._get_from_waiting_queue_attention_dp(
-            self.waiting_queue,
-            total_max_num_active_requests - total_num_active_requests)
-
-        # Update performance metrics
-        # TODO: Check whether we should update the performance metrics for all ranks
-        if self.enable_iter_perf_stats and self.dist.rank == 0:
-            self._update_new_active_requests_queue_latency(new_requests)
+        new_requests = self._fetch_and_process_requests(
+            total_num_active_requests,
+            total_max_num_active_requests,
+            enable_attention_dp=True)
 
         # Schedule attention dp requests
         new_requests_cur_rank = self._schedule_attention_dp_requests(
@@ -342,9 +302,9 @@ class ExecutorRequestQueue:
 
         # Prioritize the requests that are not in relax mode
         def get_relax_value(req_item):
-            if req_item.request.py_schedule_params is None:
+            if req_item.request.py_scheduling_params is None:
                 return True
-            return req_item.request.py_schedule_params.attention_dp_relax
+            return req_item.request.py_scheduling_params.attention_dp_relax
 
         new_requests = sorted(new_requests, key=get_relax_value, reverse=True)
 
@@ -353,8 +313,8 @@ class ExecutorRequestQueue:
         new_requests_cur_rank = []
         for req_item in new_requests:
             scheduled = False
-            if req_item.request.py_schedule_params is not None:
-                target_dp_rank = req_item.request.py_schedule_params.attention_dp_rank
+            if req_item.request.py_scheduling_params is not None:
+                target_dp_rank = req_item.request.py_scheduling_params.attention_dp_rank
                 if target_dp_rank is not None and self.all_ranks_num_active_requests[
                         target_dp_rank] < self.max_num_active_requests:
                     self.all_ranks_num_active_requests[target_dp_rank] += 1
