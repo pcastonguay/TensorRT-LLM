@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import dataclass
-from unittest.mock import Mock, MagicMock
+from unittest.mock import MagicMock, Mock
 
 import torch
 
