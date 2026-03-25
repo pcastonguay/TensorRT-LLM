@@ -3427,6 +3427,9 @@ class PyExecutor:
     def _handle_responses(self):
         new_responses = []
         requests_to_terminate = []
+        # Requests terminated by _check_disagg_ctx_cache_transfer_status (DISAGG_CONTEXT_COMPLETE);
+        # included in the return value for stats but not re-terminated here.
+        requests_finished_by_transfer = []
         new_active_requests = []
         logger.debug(
             f'------before _handle_responses, rank = {self.dist.rank}, output = {self.active_requests}'
@@ -3518,7 +3521,11 @@ class PyExecutor:
                 if self.enable_partial_reuse_for_disagg and not self.kv_cache_manager.is_vswa and self.dist.pp_size == 1:
                     requests_to_terminate.append(request)
                 else:
-                    if not request.is_disagg_context_transmission_state:
+                    if request.is_disagg_context_complete_state:
+                        # Already terminated by _check_disagg_ctx_cache_transfer_status;
+                        # track for stats only to avoid double-free.
+                        requests_finished_by_transfer.append(request)
+                    elif not request.is_disagg_context_transmission_state:
                         requests_to_terminate.append(request)
             else:
                 new_active_requests.append(request)
@@ -3529,7 +3536,7 @@ class PyExecutor:
         self._enqueue_responses(new_responses)
         for request in requests_to_terminate:
             self._terminate_request(request)
-        return requests_to_terminate
+        return requests_to_terminate + requests_finished_by_transfer
 
     def _await_any_response(self,
                             timeout: Optional[float] = None
